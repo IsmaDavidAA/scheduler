@@ -22,6 +22,8 @@ function parseRoster(text: string, date: string) {
 
 function App() {
   const [session, setSession] = useState(false)
+  const [user, setUser] = useState<{ id: string; email?: string } | null>(null)
+  const [controllers, setControllers] = useState<string[]>([])
   const [email, setEmail] = useState(''); const [password, setPassword] = useState('')
   const [schedules, setSchedules] = useState<Schedule[]>([]); const [current, setCurrent] = useState<Schedule | null>(null)
   const [tables, setTables] = useState<ScheduleTable[]>([]); const [stages, setStages] = useState<Stage[]>([])
@@ -32,11 +34,39 @@ function App() {
   const run = async (action: () => Promise<void>) => { setBusy(true); setError(''); try { await action() } catch (cause) { setError(cause instanceof Error ? cause.message : 'Operación no disponible') } finally { setBusy(false) } }
   useEffect(() => {
     if (!supabase) return
-    void supabase.auth.getSession().then(({ data }) => setSession(Boolean(data.session)))
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => setSession(Boolean(next)))
+    void supabase.auth.getSession().then(({ data }) => {
+      setSession(Boolean(data.session))
+      setUser(data.session?.user ? { id: data.session.user.id, email: data.session.user.email } : null)
+    })
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => {
+      setSession(Boolean(next))
+      setUser(next?.user ? { id: next.user.id, email: next.user.email } : null)
+    })
     return () => listener.subscription.unsubscribe()
   }, [])
   useEffect(() => { if (session) void refreshSchedules() }, [session])
+  useEffect(() => {
+    if (!supabase || !current || !user) return
+    const client = supabase
+    const channel = client
+      .channel(`schedule:${current.id}`, { config: { presence: { key: user.id } } })
+      .on('presence', { event: 'sync' }, () => {
+        const present = Object.values(channel.presenceState())
+          .flat()
+          .map((presence) => String((presence as { email?: string }).email ?? 'Operador'))
+        setControllers([...new Set(present)])
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'schedule_tables', filter: `schedule_id=eq.${current.id}` }, () => void selectSchedule(current))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'schedule_participants', filter: `schedule_id=eq.${current.id}` }, () => void selectSchedule(current))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'schedule_stages', filter: `schedule_id=eq.${current.id}` }, () => void selectSchedule(current))
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') void channel.track({ email: user.email ?? 'Operador' })
+      })
+    return () => {
+      setControllers([])
+      void client.removeChannel(channel)
+    }
+  }, [current?.id, user?.id])
   const byArea = useMemo(() => Object.fromEntries(areas.map((area) => [area, stages.filter((stage) => stage.area === area).sort((a, b) => +new Date(a.estimated_start_at) - +new Date(b.estimated_start_at))])) as Record<Area, Stage[]>, [stages])
 
   if (!supabase) return <main className="setup"><h1>Scheduler</h1><p>Falta Supabase.</p><code>Copia .env.example a .env.local y completa las variables.</code></main>
@@ -47,7 +77,7 @@ function App() {
     <section className="intro"><strong>Circuito de 60 minutos</strong><span>Medicina → Nutrición → Fisioterapia → Entrenamiento · 15 min por área · Entrenamiento: 5 mesas × 2 pacientes.</span></section>
     <section className="new-schedule"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="Nombre de la jornada" /><input type="date" value={date} onChange={(event) => setDate(event.target.value)} /><button disabled={busy || !date || !name.trim()} onClick={() => void run(async () => { const next = await createSchedule(name, date); await refreshSchedules(); await selectSchedule(next) })}>Crear jornada</button></section>
     <nav>{schedules.map((schedule) => <button key={schedule.id} className={current?.id === schedule.id ? 'selected' : 'secondary'} onClick={() => void run(() => selectSchedule(schedule))}>{schedule.name} · {schedule.operational_date}</button>)}</nav>
-    {current && <><section className="import"><h2>Importar lista</h2><p>Pega: Grupo, Nombre, Horario estimado, Fin estimado. Se aceptan cupos sin nombre.</p><textarea value={roster} onChange={(event) => setRoster(event.target.value)} placeholder={'G1-1\tNombre Apellido\t09:00 AM\t10:00 AM'} /><button disabled={busy} onClick={() => void run(async () => { const entries = parseRoster(roster, current.operational_date); if (!entries.length) throw new Error('No se encontraron filas válidas.'); await importRoster(current.id, entries, tables, stages); setRoster(''); await selectSchedule(current) })}>Importar {parseRoster(roster, current.operational_date).length || ''} participantes</button></section>
+    {current && <><section className="controllers"><strong>Controladores conectados: {controllers.length}</strong><span>{controllers.length ? controllers.join(' · ') : 'Conectando…'}</span><p>Los cambios de mesas, importaciones y etapas se actualizan automáticamente para todos los operadores de esta jornada.</p></section><section className="import"><h2>Importar lista</h2><p>Pega: Grupo, Nombre, Horario estimado, Fin estimado. Se aceptan cupos sin nombre.</p><textarea value={roster} onChange={(event) => setRoster(event.target.value)} placeholder={'G1-1\tNombre Apellido\t09:00 AM\t10:00 AM'} /><button disabled={busy} onClick={() => void run(async () => { const entries = parseRoster(roster, current.operational_date); if (!entries.length) throw new Error('No se encontraron filas válidas.'); await importRoster(current.id, entries, tables, stages); setRoster(''); await selectSchedule(current) })}>Importar {parseRoster(roster, current.operational_date).length || ''} participantes</button></section>
       {areas.map((area) => <section className="area" key={area}><div className="area-head"><div><h2>{labels[area]}</h2><p>{tables.filter((table) => table.area === area).length} mesas · capacidad {tables.filter((table) => table.area === area && table.active).reduce((sum, table) => sum + table.capacity, 0)}</p></div><div className="tables">{tables.filter((table) => table.area === area).map((table) => <button className={table.active ? 'table' : 'table inactive'} key={table.id} onClick={() => void run(async () => { await setTableActive(table); await selectSchedule(current) })}>M{table.number}{table.capacity > 1 ? ` ×${table.capacity}` : ''}</button>)}</div></div><div className="stage-list">{byArea[area].map((stage) => <article key={stage.id}><time>{time(stage.estimated_start_at)}–{time(stage.estimated_end_at)}</time><div><strong>{stage.participant?.group_name}</strong><span>{stage.participant?.name || 'Cupo pendiente'} · Mesa {stage.table_number}</span></div><em>{stage.status.replace('_', ' ')}</em>{stage.status === 'planeada' && <button onClick={() => void run(async () => { await updateStage(stage, 'en_curso'); await selectSchedule(current) })}>Iniciar</button>}{stage.status === 'en_curso' && <button onClick={() => void run(async () => { await updateStage(stage, 'completada'); await selectSchedule(current) })}>Completar</button>}</article>)}</div></section>)}</>}
   </main>
 }
