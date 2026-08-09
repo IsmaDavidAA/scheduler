@@ -1,0 +1,55 @@
+import { useEffect, useMemo, useState } from 'react'
+import './App.css'
+import {
+  areas, createSchedule, importRoster, listSchedules, loadSchedule, setTableActive, signIn, signOut, supabase, updateStage,
+  type Area, type Schedule, type ScheduleTable, type Stage,
+} from './lib/scheduler'
+
+const labels: Record<Area, string> = { medicina: 'Medicina', nutricion: 'Nutrición', fisioterapia: 'Fisioterapia', entrenamiento: 'Entrenamiento' }
+const time = (value: string) => new Intl.DateTimeFormat('es-BO', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value))
+
+function parseRoster(text: string, date: string) {
+  return text.split(/\r?\n/).flatMap((line) => {
+    const cells = line.split('\t').map((cell) => cell.trim())
+    const match = cells[2]?.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i)
+    if (!cells[0] || /^grupo$/i.test(cells[0]) || !match) return []
+    let hour = Number(match[1])
+    if (match[3]?.toUpperCase() === 'AM' && hour === 12) hour = 0
+    if (match[3]?.toUpperCase() === 'PM' && hour < 12) hour += 12
+    return [{ group_name: cells[0], name: cells[1] ?? '', starts_at: new Date(`${date}T${String(hour).padStart(2, '0')}:${match[2]}:00-04:00`).toISOString() }]
+  })
+}
+
+function App() {
+  const [session, setSession] = useState(false)
+  const [email, setEmail] = useState(''); const [password, setPassword] = useState('')
+  const [schedules, setSchedules] = useState<Schedule[]>([]); const [current, setCurrent] = useState<Schedule | null>(null)
+  const [tables, setTables] = useState<ScheduleTable[]>([]); const [stages, setStages] = useState<Stage[]>([])
+  const [name, setName] = useState('Jornada de evaluaciones'); const [date, setDate] = useState(''); const [roster, setRoster] = useState('')
+  const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
+  const refreshSchedules = async () => setSchedules(await listSchedules())
+  const selectSchedule = async (schedule: Schedule) => { setCurrent(schedule); const detail = await loadSchedule(schedule.id); setTables(detail.tables); setStages(detail.stages) }
+  const run = async (action: () => Promise<void>) => { setBusy(true); setError(''); try { await action() } catch (cause) { setError(cause instanceof Error ? cause.message : 'Operación no disponible') } finally { setBusy(false) } }
+  useEffect(() => {
+    if (!supabase) return
+    void supabase.auth.getSession().then(({ data }) => setSession(Boolean(data.session)))
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => setSession(Boolean(next)))
+    return () => listener.subscription.unsubscribe()
+  }, [])
+  useEffect(() => { if (session) void refreshSchedules() }, [session])
+  const byArea = useMemo(() => Object.fromEntries(areas.map((area) => [area, stages.filter((stage) => stage.area === area).sort((a, b) => +new Date(a.estimated_start_at) - +new Date(b.estimated_start_at))])) as Record<Area, Stage[]>, [stages])
+
+  if (!supabase) return <main className="setup"><h1>Scheduler</h1><p>Falta Supabase.</p><code>Copia .env.example a .env.local y completa las variables.</code></main>
+  if (!session) return <main className="login"><h1>Scheduler</h1><p>Ingresa con un usuario autorizado de Supabase.</p><input placeholder="Correo" value={email} onChange={(event) => setEmail(event.target.value)} /><input placeholder="Contraseña" type="password" value={password} onChange={(event) => setPassword(event.target.value)} /><button disabled={busy} onClick={() => void run(() => signIn(email, password))}>Ingresar</button>{error && <p className="error">{error}</p>}</main>
+  return <main>
+    <header><div><p className="eyebrow">OPERACIÓN EN VIVO</p><h1>Scheduler</h1></div><button className="secondary" onClick={() => void signOut()}>Salir</button></header>
+    {error && <p className="error">{error}</p>}
+    <section className="intro"><strong>Circuito de 60 minutos</strong><span>Medicina → Nutrición → Fisioterapia → Entrenamiento · 15 min por área · Entrenamiento: 5 mesas × 2 pacientes.</span></section>
+    <section className="new-schedule"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="Nombre de la jornada" /><input type="date" value={date} onChange={(event) => setDate(event.target.value)} /><button disabled={busy || !date || !name.trim()} onClick={() => void run(async () => { const next = await createSchedule(name, date); await refreshSchedules(); await selectSchedule(next) })}>Crear jornada</button></section>
+    <nav>{schedules.map((schedule) => <button key={schedule.id} className={current?.id === schedule.id ? 'selected' : 'secondary'} onClick={() => void run(() => selectSchedule(schedule))}>{schedule.name} · {schedule.operational_date}</button>)}</nav>
+    {current && <><section className="import"><h2>Importar lista</h2><p>Pega: Grupo, Nombre, Horario estimado, Fin estimado. Se aceptan cupos sin nombre.</p><textarea value={roster} onChange={(event) => setRoster(event.target.value)} placeholder={'G1-1\tNombre Apellido\t09:00 AM\t10:00 AM'} /><button disabled={busy} onClick={() => void run(async () => { const entries = parseRoster(roster, current.operational_date); if (!entries.length) throw new Error('No se encontraron filas válidas.'); await importRoster(current.id, entries, tables, stages); setRoster(''); await selectSchedule(current) })}>Importar {parseRoster(roster, current.operational_date).length || ''} participantes</button></section>
+      {areas.map((area) => <section className="area" key={area}><div className="area-head"><div><h2>{labels[area]}</h2><p>{tables.filter((table) => table.area === area).length} mesas · capacidad {tables.filter((table) => table.area === area && table.active).reduce((sum, table) => sum + table.capacity, 0)}</p></div><div className="tables">{tables.filter((table) => table.area === area).map((table) => <button className={table.active ? 'table' : 'table inactive'} key={table.id} onClick={() => void run(async () => { await setTableActive(table); await selectSchedule(current) })}>M{table.number}{table.capacity > 1 ? ` ×${table.capacity}` : ''}</button>)}</div></div><div className="stage-list">{byArea[area].map((stage) => <article key={stage.id}><time>{time(stage.estimated_start_at)}–{time(stage.estimated_end_at)}</time><div><strong>{stage.participant?.group_name}</strong><span>{stage.participant?.name || 'Cupo pendiente'} · Mesa {stage.table_number}</span></div><em>{stage.status.replace('_', ' ')}</em>{stage.status === 'planeada' && <button onClick={() => void run(async () => { await updateStage(stage, 'en_curso'); await selectSchedule(current) })}>Iniciar</button>}{stage.status === 'en_curso' && <button onClick={() => void run(async () => { await updateStage(stage, 'completada'); await selectSchedule(current) })}>Completar</button>}</article>)}</div></section>)}</>}
+  </main>
+}
+
+export default App
