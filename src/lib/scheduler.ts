@@ -156,6 +156,61 @@ export async function reassignStage(stage: Stage, tableNumber: number, tables: S
   }))
 }
 
+export async function moveParticipantToGroup(
+  medicineStage: Stage,
+  targetGroup: string,
+  targetStart: string,
+  tables: ScheduleTable[],
+  stages: Stage[],
+) {
+  const client = assertClient()
+  const participantStages = stages.filter((stage) => stage.participant_id === medicineStage.participant_id)
+  const otherStages = stages.filter((stage) => stage.participant_id !== medicineStage.participant_id)
+  const start = new Date(targetStart)
+  const medicine = selectTable('medicina', start, tables, otherStages)
+  if (+medicine.start !== +start) throw new Error('Ese grupo ya no tiene una mesa disponible en Medicina.')
+
+  const updated = new Map<string, Partial<Stage>>()
+  const medicineEnd = addMinutes(start, 15)
+  updated.set(medicineStage.id, {
+    planned_at: iso(start),
+    estimated_start_at: iso(start),
+    estimated_end_at: iso(medicineEnd),
+    table_number: medicine.number,
+    reassignment_reason: `Traslado al grupo ${targetGroup}`,
+  })
+  let nextStart = medicineEnd
+  let preferred = medicine.number
+  for (const area of areas.slice(1)) {
+    const stage = participantStages.find((item) => item.area === area)
+    if (!stage) continue
+    const selection = selectTable(area, nextStart, tables, [...otherStages, ...Array.from(updated.entries()).flatMap(([id, values]) => {
+      const original = participantStages.find((item) => item.id === id)
+      return original ? [{ ...original, ...values } as Stage] : []
+    })], preferred, stage.id)
+    const end = addMinutes(selection.start, 15)
+    updated.set(stage.id, {
+      planned_at: iso(nextStart),
+      estimated_start_at: iso(selection.start),
+      estimated_end_at: iso(end),
+      table_number: selection.number,
+      reassignment_reason: preferred === selection.number ? `Continuidad desde ${targetGroup}` : 'Mesa preferida sin capacidad disponible',
+    })
+    nextStart = end
+    preferred = selection.number
+  }
+  const suffix = medicineStage.participant?.group_name?.match(/-(.+)$/)?.[1] ?? String(medicine.number)
+  const { error: participantError } = await client
+    .from('schedule_participants')
+    .update({ group_name: `${targetGroup}-${suffix}`, starts_at: iso(start) })
+    .eq('id', medicineStage.participant_id)
+  if (participantError) throw participantError
+  await Promise.all(Array.from(updated.entries()).map(async ([id, values]) => {
+    const { error } = await client.from('schedule_stages').update(values).eq('id', id)
+    if (error) throw error
+  }))
+}
+
 export async function setTableActive(table: ScheduleTable) {
   const { error } = await assertClient().from('schedule_tables').update({ active: !table.active }).eq('id', table.id)
   if (error) throw error

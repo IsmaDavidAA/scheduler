@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 import {
-  areas, availableTableNumbers, createSchedule, importRoster, listSchedules, loadSchedule, reassignStage, setTableActive, signIn, signOut, supabase, updateStage,
+  areas, availableTableNumbers, createSchedule, importRoster, listSchedules, loadSchedule, moveParticipantToGroup, reassignStage, setTableActive, signIn, signOut, supabase, updateStage,
   type Area, type Schedule, type ScheduleTable, type Stage,
 } from './lib/scheduler'
 
@@ -69,6 +69,22 @@ function App() {
     }
   }, [current?.id, user?.id])
   const byArea = useMemo(() => Object.fromEntries(areas.map((area) => [area, stages.filter((stage) => stage.area === area).sort((a, b) => +new Date(a.estimated_start_at) - +new Date(b.estimated_start_at))])) as Record<Area, Stage[]>, [stages])
+  const groupBlocks = useMemo(() => {
+    const blocks = new Map<string, { group: string; start: string }>()
+    stages.filter((stage) => stage.area === 'medicina' && stage.participant).forEach((stage) => {
+      const group = stage.participant!.group_name.split('-')[0]
+      blocks.set(`${group}|${stage.planned_at}`, { group, start: stage.planned_at })
+    })
+    return [...blocks.values()]
+  }, [stages])
+  const availableGroupBlocks = (stage: Stage) => {
+    const capacity = tables.filter((table) => table.area === 'medicina' && table.active).reduce((total, table) => total + table.capacity, 0)
+    return groupBlocks.filter((block) => {
+      if (block.start === stage.planned_at) return false
+      const assigned = stages.filter((item) => item.id !== stage.id && item.area === 'medicina' && item.planned_at === block.start && item.status !== 'completada').length
+      return assigned < capacity
+    })
+  }
   const tableState = (table: ScheduleTable) => {
     if (!table.active) return { label: 'bloqueada', className: 'table blocked' }
     const attending = stages.filter((stage) => stage.area === table.area && stage.table_number === table.number && stage.status === 'en_curso').length
@@ -86,7 +102,7 @@ function App() {
     <nav>{schedules.map((schedule) => <button key={schedule.id} className={current?.id === schedule.id ? 'selected' : 'secondary'} onClick={() => void run(() => selectSchedule(schedule))}>{schedule.name} · {schedule.operational_date}</button>)}</nav>
     {current && <><section className="controllers"><strong>Controladores conectados: {controllers.length}</strong><span>{controllers.length ? controllers.join(' · ') : 'Conectando…'}</span><p>Los cambios de mesas, importaciones y etapas se actualizan automáticamente para todos los operadores de esta jornada.</p></section><section className="import"><h2>Importar lista</h2><p>Pega: Grupo, Nombre, Horario estimado, Fin estimado. Se aceptan cupos sin nombre.</p><textarea value={roster} onChange={(event) => setRoster(event.target.value)} placeholder={'G1-1\tNombre Apellido\t09:00 AM\t10:00 AM'} /><button disabled={busy} onClick={() => void run(async () => { const entries = parseRoster(roster, current.operational_date); if (!entries.length) throw new Error('No se encontraron filas válidas.'); await importRoster(current.id, entries, tables, stages); setRoster(''); await selectSchedule(current) })}>Importar {parseRoster(roster, current.operational_date).length || ''} participantes</button></section>
       <div className="area-tabs">{areas.map((area) => <button key={area} className={activeArea === area ? 'selected' : 'secondary'} onClick={() => setActiveArea(area)}>{labels[area]}</button>)}</div>
-      <section className="area"><div className="area-head"><div><h2>{labels[activeArea]}</h2><p>{tables.filter((table) => table.area === activeArea).length} mesas · capacidad {tables.filter((table) => table.area === activeArea && table.active).reduce((sum, table) => sum + table.capacity, 0)}</p></div><div className="tables">{tables.filter((table) => table.area === activeArea).map((table) => { const state = tableState(table); return <button className={state.className} key={table.id} onClick={() => void run(async () => { await setTableActive(table); await selectSchedule(current) })}>M{table.number} · {state.label}</button> })}</div></div><div className="stage-list">{byArea[activeArea].map((stage) => <article key={stage.id}><time>{time(stage.estimated_start_at)}–{time(stage.estimated_end_at)}</time><div><strong>{stage.participant?.group_name}</strong><span>{stage.participant?.name || 'Cupo pendiente'} · Mesa {stage.table_number}</span></div><em>{stage.status.replace('_', ' ')}</em><select aria-label={`Mesa para ${stage.participant?.group_name ?? stage.id}`} value={stage.table_number} onChange={(event) => void run(async () => { await reassignStage(stage, Number(event.target.value), tables, stages); await selectSchedule(current) })}>{availableTableNumbers(stage, tables, stages).map((number) => <option key={number} value={number}>Mesa {number}</option>)}</select>{stage.status === 'planeada' && <button onClick={() => void run(async () => { await updateStage(stage, 'en_curso'); await selectSchedule(current) })}>Iniciar</button>}{stage.status === 'en_curso' && <button onClick={() => void run(async () => { await updateStage(stage, 'completada'); await selectSchedule(current) })}>Completar</button>}</article>)}</div></section></>}
+      <section className="area"><div className="area-head"><div><h2>{labels[activeArea]}</h2><p>{tables.filter((table) => table.area === activeArea).length} mesas · capacidad {tables.filter((table) => table.area === activeArea && table.active).reduce((sum, table) => sum + table.capacity, 0)}</p></div><div className="tables">{tables.filter((table) => table.area === activeArea).map((table) => { const state = tableState(table); return <button className={state.className} key={table.id} onClick={() => void run(async () => { await setTableActive(table); await selectSchedule(current) })}>M{table.number} · {state.label}</button> })}</div></div><div className="stage-list">{byArea[activeArea].map((stage) => <article key={stage.id}><time>{time(stage.estimated_start_at)}–{time(stage.estimated_end_at)}</time><div><strong>{stage.participant?.group_name}</strong><span>{stage.participant?.name || 'Cupo pendiente'} · Mesa {stage.table_number}</span></div><em>{stage.status.replace('_', ' ')}</em><select aria-label={`Mesa para ${stage.participant?.group_name ?? stage.id}`} value={stage.table_number} onChange={(event) => void run(async () => { await reassignStage(stage, Number(event.target.value), tables, stages); await selectSchedule(current) })}>{availableTableNumbers(stage, tables, stages).map((number) => <option key={number} value={number}>Mesa {number}</option>)}</select>{activeArea === 'medicina' && <select aria-label={`Mover ${stage.participant?.name ?? 'participante'} a grupo`} value="" onChange={(event) => { const block = availableGroupBlocks(stage).find((item) => `${item.group}|${item.start}` === event.target.value); if (block) void run(async () => { await moveParticipantToGroup(stage, block.group, block.start, tables, stages); await selectSchedule(current) }) }}><option value="">Mover a grupo…</option>{availableGroupBlocks(stage).map((block) => <option key={`${block.group}|${block.start}`} value={`${block.group}|${block.start}`}>{block.group} · {time(block.start)}</option>)}</select>}{stage.status === 'planeada' && <button onClick={() => void run(async () => { await updateStage(stage, 'en_curso'); await selectSchedule(current) })}>Iniciar</button>}{stage.status === 'en_curso' && <button onClick={() => void run(async () => { await updateStage(stage, 'completada'); await selectSchedule(current) })}>Completar</button>}</article>)}</div></section></>}
   </main>
 }
 
