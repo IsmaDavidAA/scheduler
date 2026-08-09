@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
+import PublicBoard from './PublicBoard'
 import {
   addParticipantToGroup, areas, availableTableNumbers, createSchedule, importRoster, listSchedules, loadSchedule, moveParticipantToGroup, reassignStage, removeParticipant, setTableActive, signIn, signOut, supabase, updateStage,
   type Area, type Schedule, type ScheduleTable, type Stage,
@@ -106,8 +107,9 @@ function App() {
   }
   const delayMinutes = (stage: Stage) => Math.max(0, Math.round((+new Date(stage.actual_start_at ?? stage.estimated_start_at) - +new Date(stage.planned_at)) / 60_000))
 
+  if (window.location.hash === '#public') return <PublicBoard />
   if (!supabase) return <main className="setup"><h1>Scheduler</h1><p>Falta Supabase.</p><code>Copia .env.example a .env.local y completa las variables.</code></main>
-  if (!session) return <main className="login"><h1>Scheduler</h1><p>Ingresa con un usuario autorizado de Supabase.</p><input placeholder="Correo" value={email} onChange={(event) => setEmail(event.target.value)} /><input placeholder="Contraseña" type="password" value={password} onChange={(event) => setPassword(event.target.value)} /><button disabled={busy} onClick={() => void run(() => signIn(email, password))}>Ingresar</button>{error && <p className="error">{error}</p>}</main>
+  if (!session) return <main className="login"><h1>Scheduler</h1><p>Ingresa con un usuario autorizado de Supabase.</p><input placeholder="Correo" value={email} onChange={(event) => setEmail(event.target.value)} /><input placeholder="Contraseña" type="password" value={password} onChange={(event) => setPassword(event.target.value)} /><button disabled={busy} onClick={() => void run(() => signIn(email, password))}>Ingresar</button><a href="#public">Ver horario público</a>{error && <p className="error">{error}</p>}</main>
   return <main>
     <header><div><p className="eyebrow">OPERACIÓN EN VIVO</p><h1>Scheduler</h1></div><button className="secondary" onClick={() => void signOut()}>Salir</button></header>
     {error && <p className="error">{error}</p>}

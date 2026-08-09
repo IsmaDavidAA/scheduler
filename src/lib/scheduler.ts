@@ -17,6 +17,12 @@ export type Stage = {
   actual_end_at: string | null; table_number: number; status: StageStatus; reassignment_reason: string | null;
   participant?: Participant
 }
+export type PublicStage = {
+  schedule_id: string; schedule_name: string; operational_date: string; stage_id: string; area: Area; area_order: number;
+  group_name: string; planned_at: string; estimated_start_at: string; estimated_end_at: string;
+  actual_start_at: string | null; actual_end_at: string | null; table_number: number; status: StageStatus
+}
+export type PublicTable = Pick<ScheduleTable, 'schedule_id' | 'area' | 'number' | 'capacity' | 'active'>
 
 const assertClient = () => {
   if (!supabase) throw new Error('Configura VITE_SUPABASE_URL y VITE_SUPABASE_PUBLISHABLE_KEY en .env.local.')
@@ -40,6 +46,17 @@ export async function loadSchedule(id: string) {
   ])
   for (const response of [tables, participants, stages]) if (response.error) throw response.error
   return { tables: tables.data as ScheduleTable[], participants: participants.data as Participant[], stages: stages.data as Stage[] }
+}
+
+export async function loadPublicBoard() {
+  const client = assertClient()
+  const [stages, tables] = await Promise.all([
+    client.from('public_schedule_stages').select('*').order('estimated_start_at'),
+    client.from('public_schedule_tables').select('*').order('area').order('number'),
+  ])
+  if (stages.error) throw stages.error
+  if (tables.error) throw tables.error
+  return { stages: stages.data as PublicStage[], tables: tables.data as PublicTable[] }
 }
 
 export async function createSchedule(name: string, operationalDate: string) {
