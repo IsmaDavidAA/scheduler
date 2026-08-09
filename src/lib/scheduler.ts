@@ -116,7 +116,7 @@ export function availableTableNumbers(stage: Stage, tables: ScheduleTable[], sta
     .filter((table) => table.area === stage.area && table.active)
     .filter((table) => stages.filter((item) =>
       item.id !== stage.id && item.area === stage.area && item.table_number === table.number &&
-      item.status !== 'completada' && new Date(item.estimated_start_at) < end && new Date(item.estimated_end_at) > start,
+      item.status === 'en_curso' && new Date(item.estimated_start_at) < end && new Date(item.estimated_end_at) > start,
     ).length < table.capacity)
     .map((table) => table.number)
 }
