@@ -57,11 +57,11 @@ export async function createSchedule(name: string, operationalDate: string) {
 
 export type RosterEntry = { group_name: string; name: string; starts_at: string }
 
-function selectTable(area: Area, desired: Date, tables: ScheduleTable[], stages: Stage[], preferred?: number) {
+function selectTable(area: Area, desired: Date, tables: ScheduleTable[], stages: Stage[], preferred?: number, excludedStageId?: string) {
   const candidates = tables.filter((table) => table.area === area && table.active).map((table) => {
     const end = addMinutes(desired, 15)
     const overlapping = stages.filter((stage) =>
-      stage.area === area && stage.table_number === table.number && stage.status !== 'completada' &&
+      stage.id !== excludedStageId && stage.area === area && stage.table_number === table.number && stage.status !== 'completada' &&
       new Date(stage.estimated_start_at) < end && new Date(stage.estimated_end_at) > desired,
     )
     const free = overlapping.length < table.capacity
@@ -107,6 +107,53 @@ export async function updateStage(stage: Stage, status: StageStatus) {
     : { status, actual_start_at: stage.actual_start_at ?? now, actual_end_at: now }
   const { error } = await assertClient().from('schedule_stages').update(changes).eq('id', stage.id)
   if (error) throw error
+}
+
+export function availableTableNumbers(stage: Stage, tables: ScheduleTable[], stages: Stage[]) {
+  const start = new Date(stage.estimated_start_at)
+  const end = new Date(stage.estimated_end_at)
+  return tables
+    .filter((table) => table.area === stage.area && table.active)
+    .filter((table) => stages.filter((item) =>
+      item.id !== stage.id && item.area === stage.area && item.table_number === table.number &&
+      item.status !== 'completada' && new Date(item.estimated_start_at) < end && new Date(item.estimated_end_at) > start,
+    ).length < table.capacity)
+    .map((table) => table.number)
+}
+
+export async function reassignStage(stage: Stage, tableNumber: number, tables: ScheduleTable[], stages: Stage[]) {
+  if (!availableTableNumbers(stage, tables, stages).includes(tableNumber)) {
+    throw new Error('La mesa elegida ya no tiene capacidad para este horario.')
+  }
+  const client = assertClient()
+  const downstream = areas
+    .slice(stage.area_order)
+    .map((area) => stages.find((item) => item.participant_id === stage.participant_id && item.area === area))
+    .filter((item): item is Stage => Boolean(item))
+  const reassigned = new Map<string, Partial<Stage>>()
+  reassigned.set(stage.id, { table_number: tableNumber, reassignment_reason: 'Reasignación operativa manual' })
+  let preferred = tableNumber
+  let nextStart = new Date(stage.estimated_end_at)
+  const fixedStages = stages.filter((item) => !downstream.some((next) => next.id === item.id))
+  for (const next of downstream) {
+    const selection = selectTable(next.area, nextStart, tables, [...fixedStages, ...Array.from(reassigned.entries()).flatMap(([id, values]) => {
+      const original = stages.find((item) => item.id === id)
+      return original ? [{ ...original, ...values } as Stage] : []
+    })], preferred, next.id)
+    const end = addMinutes(selection.start, 15)
+    reassigned.set(next.id, {
+      table_number: selection.number,
+      estimated_start_at: iso(selection.start),
+      estimated_end_at: iso(end),
+      reassignment_reason: preferred !== selection.number ? 'Mesa preferida sin capacidad disponible' : 'Continuidad tras reasignación operativa',
+    })
+    preferred = selection.number
+    nextStart = end
+  }
+  await Promise.all(Array.from(reassigned.entries()).map(async ([id, values]) => {
+    const { error } = await client.from('schedule_stages').update(values).eq('id', id)
+    if (error) throw error
+  }))
 }
 
 export async function setTableActive(table: ScheduleTable) {
