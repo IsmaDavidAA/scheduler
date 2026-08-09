@@ -164,8 +164,32 @@ export async function moveParticipantToGroup(
   stages: Stage[],
 ) {
   const client = assertClient()
+  if (medicineStage.status !== 'planeada') {
+    throw new Error('Solo se puede cambiar de grupo antes de iniciar la atención de Medicina.')
+  }
+  const targetVacancy = stages.find((stage) =>
+    stage.area === 'medicina' &&
+    stage.planned_at === targetStart &&
+    stage.participant?.group_name.split('-')[0] === targetGroup &&
+    !stage.participant?.name.trim(),
+  )
+  if (targetVacancy?.participant && medicineStage.participant) {
+    const { error: fillError } = await client
+      .from('schedule_participants')
+      .update({ name: medicineStage.participant.name })
+      .eq('id', targetVacancy.participant_id)
+    if (fillError) throw fillError
+    const { error: removeError } = await client
+      .from('schedule_participants')
+      .delete()
+      .eq('id', medicineStage.participant_id)
+    if (removeError) throw removeError
+    return
+  }
   const participantStages = stages.filter((stage) => stage.participant_id === medicineStage.participant_id)
-  const otherStages = stages.filter((stage) => stage.participant_id !== medicineStage.participant_id)
+  const otherStages = stages.filter((stage) =>
+    stage.participant_id !== medicineStage.participant_id && Boolean(stage.participant?.name.trim()),
+  )
   const start = new Date(targetStart)
   const medicine = selectTable('medicina', start, tables, otherStages)
   if (+medicine.start !== +start) throw new Error('Ese grupo ya no tiene una mesa disponible en Medicina.')
