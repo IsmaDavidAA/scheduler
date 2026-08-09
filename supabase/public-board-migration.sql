@@ -8,6 +8,7 @@ select
   e.area,
   e.area_order,
   p.group_name,
+  p.name as participant_name,
   e.planned_at,
   e.estimated_start_at,
   e.estimated_end_at,

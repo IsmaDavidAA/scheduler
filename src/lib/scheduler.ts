@@ -19,7 +19,7 @@ export type Stage = {
 }
 export type PublicStage = {
   schedule_id: string; schedule_name: string; operational_date: string; stage_id: string; area: Area; area_order: number;
-  group_name: string; planned_at: string; estimated_start_at: string; estimated_end_at: string;
+  group_name: string; participant_name: string; planned_at: string; estimated_start_at: string; estimated_end_at: string;
   actual_start_at: string | null; actual_end_at: string | null; table_number: number; status: StageStatus
 }
 export type PublicTable = Pick<ScheduleTable, 'schedule_id' | 'area' | 'number' | 'capacity' | 'active'>
