@@ -12,6 +12,7 @@ export default function PublicBoard() {
   const [scheduleId, setScheduleId] = useState('')
   const [area, setArea] = useState<Area>('medicina')
   const [search, setSearch] = useState('')
+  const [page, setPage] = useState(0)
   const [error, setError] = useState('')
   const refresh = async () => {
     try {
@@ -35,6 +36,8 @@ export default function PublicBoard() {
     const query = normalize(search)
     return stages.filter((stage) => stage.schedule_id === scheduleId && stage.area === area && (!query || normalize(`${stage.group_name} ${stage.participant_name}`).includes(query)))
   }, [stages, scheduleId, area, search])
+  const pageCount = Math.max(1, Math.ceil(visible.length / 20))
+  const pagedVisible = visible.slice(page * 20, page * 20 + 20)
   const areaTables = tables.filter((table) => table.schedule_id === scheduleId && table.area === area)
   const inProgress = visible.filter((stage) => stage.status === 'en_curso')
   const waiting = visible.filter((stage) => stage.status === 'planeada' && +new Date(stage.estimated_start_at) <= Date.now())
@@ -44,9 +47,9 @@ export default function PublicBoard() {
   return <main className="public-board">
     <header><div><p className="eyebrow">HORARIO EN VIVO</p><h1>Tu circuito de evaluación</h1><p className="public-note">Busca por nombre o código de grupo.</p></div><a href="#">Acceso coordinadores</a></header>
     {error && <p className="error">{error}</p>}
-    <section className="public-controls"><select value={scheduleId} onChange={(event) => setScheduleId(event.target.value)}>{schedules.map((schedule) => <option key={schedule.id} value={schedule.id}>{schedule.name} · {schedule.date}</option>)}</select><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar nombre o grupo, ej. Vanessa / G4-2" /></section>
-    <div className="area-tabs">{areas.map((item) => <button key={item} className={area === item ? 'selected' : 'secondary'} onClick={() => setArea(item)}>{labels[item]}</button>)}</div>
+    <section className="public-controls"><select value={scheduleId} onChange={(event) => { setScheduleId(event.target.value); setPage(0) }}>{schedules.map((schedule) => <option key={schedule.id} value={schedule.id}>{schedule.name} · {schedule.date}</option>)}</select><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(0) }} placeholder="Buscar nombre o grupo, ej. Vanessa / G4-2" /></section>
+    <div className="area-tabs">{areas.map((item) => <button key={item} className={area === item ? 'selected' : 'secondary'} onClick={() => { setArea(item); setPage(0) }}>{labels[item]}</button>)}</div>
     <section className="public-summary"><div><strong>{inProgress.length}</strong><span>en atención</span></div><div><strong>{waiting.length}</strong><span>esperando</span></div><div><strong>{delayed.length}</strong><span>con retraso</span></div><div><strong>{freeTables.length}</strong><span>mesas libres</span></div></section>
-    <section className="public-list"><h2>{labels[area]}</h2>{visible.map((stage) => <article key={stage.stage_id} className={stage.status === 'en_curso' ? 'current' : delay(stage) ? 'late' : ''}><time>{time(stage.actual_start_at ?? stage.estimated_start_at)}</time><div><strong>{stage.participant_name}</strong><span>{stage.group_name} · Mesa {stage.table_number}{delay(stage) ? ` · +${delay(stage)} min` : ''}</span></div><em>{stage.status === 'en_curso' ? 'En atención' : delay(stage) ? 'Con retraso' : +new Date(stage.estimated_start_at) <= Date.now() ? 'Esperando' : 'Próximo'}</em></article>)}{!visible.length && <p>No hay turnos para mostrar.</p>}</section>
+    <section className="public-list"><h2>{labels[area]}</h2>{pagedVisible.map((stage) => <article key={stage.stage_id} className={stage.status === 'en_curso' ? 'current' : delay(stage) ? 'late' : ''}><time>{time(stage.actual_start_at ?? stage.estimated_start_at)}</time><div><strong>{stage.participant_name}</strong><span>{stage.group_name} · Mesa {stage.table_number}{delay(stage) ? ` · +${delay(stage)} min` : ''}</span></div><em>{stage.status === 'en_curso' ? 'En atención' : delay(stage) ? 'Con retraso' : +new Date(stage.estimated_start_at) <= Date.now() ? 'Esperando' : 'Próximo'}</em></article>)}{!visible.length && <p>No hay turnos para mostrar.</p>}<div className="pagination"><button className="secondary" disabled={page === 0} onClick={() => setPage(page - 1)}>Anterior</button><span>Página {page + 1} de {pageCount} · {visible.length} registros</span><button disabled={page + 1 >= pageCount} onClick={() => setPage(page + 1)}>Siguiente</button></div></section>
   </main>
 }
