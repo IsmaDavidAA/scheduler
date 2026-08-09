@@ -318,6 +318,86 @@ export async function moveParticipantToGroup(
   })
 }
 
+export async function addParticipantToGroup(
+  scheduleId: string,
+  name: string,
+  targetGroup: string,
+  targetStart: string,
+  tables: ScheduleTable[],
+  stages: Stage[],
+) {
+  const client = assertClient()
+  const vacancy = stages.find((stage) =>
+    stage.area === 'medicina' &&
+    stage.planned_at === targetStart &&
+    stage.participant?.group_name.split('-')[0] === targetGroup &&
+    !stage.participant?.name.trim(),
+  )
+  if (vacancy?.participant) {
+    const { error } = await client.from('schedule_participants').update({ name }).eq('id', vacancy.participant_id)
+    if (error) throw error
+    await writeScheduleLog(scheduleId, 'participante_agregado', {
+      nombre: name,
+      grupo: vacancy.participant.group_name,
+      horario: targetStart,
+      cupoPendiente: true,
+    }, vacancy.participant_id, vacancy.id)
+    return
+  }
+  const start = new Date(targetStart)
+  const occupied = stages.filter((stage) => Boolean(stage.participant?.name.trim()))
+  const medicine = selectTable('medicina', start, tables, occupied)
+  if (+medicine.start !== +start) throw new Error('El grupo elegido ya no tiene una mesa disponible.')
+  const { data: participant, error: participantError } = await client
+    .from('schedule_participants')
+    .insert({ schedule_id: scheduleId, group_name: `${targetGroup}-${medicine.number}`, name, starts_at: iso(start) })
+    .select()
+    .single()
+  if (participantError) throw participantError
+  const circuit: Omit<Stage, 'id' | 'participant'>[] = []
+  let nextStart = start
+  let preferred = medicine.number
+  for (const [index, area] of areas.entries()) {
+    const selected = index === 0
+      ? { number: medicine.number, start }
+      : selectTable(area, nextStart, tables, [...occupied, ...circuit] as Stage[], preferred)
+    const end = addMinutes(selected.start, 15)
+    circuit.push({
+      schedule_id: scheduleId, participant_id: participant.id, area, area_order: index + 1,
+      planned_at: iso(nextStart), estimated_start_at: iso(selected.start), estimated_end_at: iso(end),
+      actual_start_at: null, actual_end_at: null, table_number: selected.number, status: 'planeada',
+      reassignment_reason: selected.number === preferred ? null : 'Mesa alternativa por disponibilidad',
+    })
+    nextStart = end
+    preferred = selected.number
+  }
+  const { error: stageError } = await client.from('schedule_stages').insert(circuit)
+  if (stageError) throw stageError
+  await writeScheduleLog(scheduleId, 'participante_agregado', {
+    nombre: name,
+    grupo: `${targetGroup}-${medicine.number}`,
+    horario: targetStart,
+    cupoPendiente: false,
+  }, participant.id)
+}
+
+export async function removeParticipant(stage: Stage, stages: Stage[]) {
+  if (!stage.participant?.name.trim()) throw new Error('Ese cupo ya está disponible.')
+  if (stages.some((item) => item.participant_id === stage.participant_id && item.status !== 'planeada')) {
+    throw new Error('No se puede quitar un participante que ya tiene una atención iniciada o completada.')
+  }
+  const { error } = await assertClient()
+    .from('schedule_participants')
+    .update({ name: '' })
+    .eq('id', stage.participant_id)
+  if (error) throw error
+  await writeOperationLog(stage, 'participante_retirado', {
+    nombre: stage.participant.name,
+    grupo: stage.participant.group_name,
+    motivo: 'Cupo liberado por operador',
+  })
+}
+
 export async function setTableActive(table: ScheduleTable) {
   const { error } = await assertClient().from('schedule_tables').update({ active: !table.active }).eq('id', table.id)
   if (error) throw error
