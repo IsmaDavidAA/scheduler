@@ -8,6 +8,8 @@ grant all on schema public to postgres, service_role;
 alter default privileges in schema public grant all on tables to postgres, service_role;
 alter default privileges in schema public grant all on sequences to postgres, service_role;
 alter default privileges in schema public grant all on functions to postgres, service_role;
+alter default privileges in schema public grant select, insert, update, delete on tables to authenticated;
+alter default privileges in schema public grant usage, select on sequences to authenticated;
 
 create type public.schedule_area as enum ('medicina', 'nutricion', 'fisioterapia', 'entrenamiento');
 create type public.schedule_stage_status as enum ('planeada', 'en_curso', 'completada');
@@ -57,6 +59,8 @@ alter table public.schedules enable row level security;
 alter table public.schedule_tables enable row level security;
 alter table public.schedule_participants enable row level security;
 alter table public.schedule_stages enable row level security;
+grant select, insert, update, delete on all tables in schema public to authenticated;
+grant usage, select on all sequences in schema public to authenticated;
 create policy "Authenticated scheduler access" on public.schedules for all to authenticated using (true) with check (true);
 create policy "Authenticated scheduler access" on public.schedule_tables for all to authenticated using (true) with check (true);
 create policy "Authenticated scheduler access" on public.schedule_participants for all to authenticated using (true) with check (true);
