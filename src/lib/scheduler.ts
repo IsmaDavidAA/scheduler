@@ -52,6 +52,7 @@ export async function createSchedule(name: string, operationalDate: string) {
   ))
   const tables = await client.from('schedule_tables').insert(defaultTables)
   if (tables.error) throw tables.error
+  await writeScheduleLog(data.id, 'jornada_creada', { nombre: name, fechaOperativa: operationalDate })
   return data as Schedule
 }
 
@@ -62,6 +63,7 @@ function selectTable(area: Area, desired: Date, tables: ScheduleTable[], stages:
     const end = addMinutes(desired, 15)
     const overlapping = stages.filter((stage) =>
       stage.id !== excludedStageId && stage.area === area && stage.table_number === table.number && stage.status !== 'completada' &&
+      (stage.participant === undefined || Boolean(stage.participant.name.trim())) &&
       new Date(stage.estimated_start_at) < end && new Date(stage.estimated_end_at) > desired,
     )
     const free = overlapping.length < table.capacity
@@ -98,15 +100,81 @@ export async function importRoster(scheduleId: string, entries: RosterEntry | Ro
   }
   const stages = await client.from('schedule_stages').insert(planned)
   if (stages.error) throw stages.error
+  await writeScheduleLog(scheduleId, 'participantes_importados', { cantidad: participants.length })
 }
 
-export async function updateStage(stage: Stage, status: StageStatus) {
-  const now = iso(new Date())
+async function writeScheduleLog(
+  scheduleId: string,
+  action: string,
+  details: Record<string, unknown>,
+  participantId?: string,
+  stageId?: string,
+) {
+  const client = assertClient()
+  const { data } = await client.auth.getUser()
+  const { error } = await client.from('schedule_operation_logs').insert({
+    schedule_id: scheduleId,
+    participant_id: participantId ?? null,
+    stage_id: stageId ?? null,
+    actor_id: data.user?.id ?? null,
+    action,
+    details,
+  })
+  if (error) console.warn('No se pudo registrar la operación', error.message)
+}
+
+async function writeOperationLog(stage: Stage, action: string, details: Record<string, unknown>) {
+  await writeScheduleLog(stage.schedule_id, action, details, stage.participant_id, stage.id)
+}
+
+async function reforecastPendingStages(stage: Stage, nextStart: Date, tables: ScheduleTable[], stages: Stage[]) {
+  const pending = stages
+    .filter((item) => item.participant_id === stage.participant_id && item.area_order > stage.area_order && item.status === 'planeada')
+    .sort((a, b) => a.area_order - b.area_order)
+  const fixed = stages.filter((item) => !pending.some((next) => next.id === item.id))
+  const updates = new Map<string, Partial<Stage>>()
+  let preferred = stage.table_number
+  for (const next of pending) {
+    const selection = selectTable(next.area, nextStart, tables, [...fixed, ...Array.from(updates.entries()).flatMap(([id, values]) => {
+      const original = stages.find((item) => item.id === id)
+      return original ? [{ ...original, ...values } as Stage] : []
+    })], preferred, next.id)
+    const end = addMinutes(selection.start, 15)
+    updates.set(next.id, {
+      estimated_start_at: iso(selection.start),
+      estimated_end_at: iso(end),
+      table_number: selection.number,
+      reassignment_reason: preferred === selection.number ? 'Pronóstico ajustado por retraso previo' : 'Mesa alternativa por disponibilidad tras retraso',
+    })
+    nextStart = end
+    preferred = selection.number
+  }
+  await Promise.all(Array.from(updates.entries()).map(async ([id, values]) => {
+    const { error } = await assertClient().from('schedule_stages').update(values).eq('id', id)
+    if (error) throw error
+  }))
+}
+
+export async function updateStage(stage: Stage, status: StageStatus, tables: ScheduleTable[], stages: Stage[]) {
+  const nowDate = new Date()
+  const now = iso(nowDate)
   const changes = status === 'en_curso'
     ? { status, actual_start_at: stage.actual_start_at ?? now }
     : { status, actual_start_at: stage.actual_start_at ?? now, actual_end_at: now }
   const { error } = await assertClient().from('schedule_stages').update(changes).eq('id', stage.id)
   if (error) throw error
+  const actualStart = new Date(stage.actual_start_at ?? now)
+  const delayMinutes = Math.max(0, Math.round((+actualStart - +new Date(stage.planned_at)) / 60_000))
+  const nextStart = status === 'completada' ? nowDate : addMinutes(actualStart, 15)
+  await reforecastPendingStages(stage, nextStart, tables, stages)
+  await writeOperationLog(stage, status === 'en_curso' ? 'etapa_iniciada' : 'etapa_completada', {
+    area: stage.area,
+    mesa: stage.table_number,
+    horarioPlaneado: stage.planned_at,
+    horarioReal: status === 'en_curso' ? actualStart.toISOString() : now,
+    retrasoMinutos: delayMinutes,
+    siguienteEstimado: nextStart.toISOString(),
+  })
 }
 
 export function availableTableNumbers(stage: Stage, tables: ScheduleTable[], stages: Stage[]) {
@@ -154,6 +222,11 @@ export async function reassignStage(stage: Stage, tableNumber: number, tables: S
     const { error } = await client.from('schedule_stages').update(values).eq('id', id)
     if (error) throw error
   }))
+  await writeOperationLog(stage, 'mesa_reasignada', {
+    mesaAnterior: stage.table_number,
+    mesaNueva: tableNumber,
+    etapasRecalculadas: downstream.length,
+  })
 }
 
 export async function moveParticipantToGroup(
@@ -184,6 +257,11 @@ export async function moveParticipantToGroup(
       .delete()
       .eq('id', medicineStage.participant_id)
     if (removeError) throw removeError
+    await writeOperationLog(medicineStage, 'traslado_grupo', {
+      grupoDestino: targetGroup,
+      horarioDestino: targetStart,
+      cupoDestino: targetVacancy.participant.group_name,
+    })
     return
   }
   const participantStages = stages.filter((stage) => stage.participant_id === medicineStage.participant_id)
@@ -233,11 +311,20 @@ export async function moveParticipantToGroup(
     const { error } = await client.from('schedule_stages').update(values).eq('id', id)
     if (error) throw error
   }))
+  await writeOperationLog(medicineStage, 'traslado_grupo', {
+    grupoDestino: targetGroup,
+    horarioDestino: targetStart,
+    mesaDestino: medicine.number,
+  })
 }
 
 export async function setTableActive(table: ScheduleTable) {
   const { error } = await assertClient().from('schedule_tables').update({ active: !table.active }).eq('id', table.id)
   if (error) throw error
+  await writeScheduleLog(table.schedule_id, table.active ? 'mesa_bloqueada' : 'mesa_habilitada', {
+    area: table.area,
+    mesa: table.number,
+  })
 }
 
 export async function signIn(email: string, password: string) {

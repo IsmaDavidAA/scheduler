@@ -53,18 +53,31 @@ create table public.schedule_stages (
   reassignment_reason text,
   unique (participant_id, area)
 );
+create table public.schedule_operation_logs (
+  id uuid primary key default gen_random_uuid(),
+  schedule_id uuid not null references public.schedules(id) on delete cascade,
+  participant_id uuid references public.schedule_participants(id) on delete set null,
+  stage_id uuid references public.schedule_stages(id) on delete set null,
+  actor_id uuid references auth.users(id) on delete set null,
+  action text not null,
+  details jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
 create index schedule_stages_assignment_idx on public.schedule_stages (schedule_id, area, table_number);
+create index schedule_operation_logs_schedule_idx on public.schedule_operation_logs (schedule_id, created_at desc);
 
 alter table public.schedules enable row level security;
 alter table public.schedule_tables enable row level security;
 alter table public.schedule_participants enable row level security;
 alter table public.schedule_stages enable row level security;
+alter table public.schedule_operation_logs enable row level security;
 grant select, insert, update, delete on all tables in schema public to authenticated;
 grant usage, select on all sequences in schema public to authenticated;
 create policy "Authenticated scheduler access" on public.schedules for all to authenticated using (true) with check (true);
 create policy "Authenticated scheduler access" on public.schedule_tables for all to authenticated using (true) with check (true);
 create policy "Authenticated scheduler access" on public.schedule_participants for all to authenticated using (true) with check (true);
 create policy "Authenticated scheduler access" on public.schedule_stages for all to authenticated using (true) with check (true);
-alter publication supabase_realtime add table public.schedules, public.schedule_tables, public.schedule_participants, public.schedule_stages;
+create policy "Authenticated scheduler access" on public.schedule_operation_logs for all to authenticated using (true) with check (true);
+alter publication supabase_realtime add table public.schedules, public.schedule_tables, public.schedule_participants, public.schedule_stages, public.schedule_operation_logs;
 
 commit;
